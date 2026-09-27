@@ -104,8 +104,15 @@ FALLBACK_GEO_NODES = [
     {"lat": 1.3521, "lon": 103.8198, "country": "Singapore", "city": "Singapore"},
 ]
 
-async def _enrich_and_store(event: dict) -> None:
-    """Enrich with geolocation and persist, then broadcast."""
+async def _enrich_and_store(event: dict, broadcast: bool = True) -> None:
+    """
+    Enrich with geolocation and persist, then optionally broadcast.
+
+    broadcast=False is used only by the /upload alert-storm guard to store
+    suppressed duplicate events for the Log Archive without flooding the
+    live feed / 3D globe / WebSocket. Every other caller (target-ip, stream)
+    keeps the original always-broadcast behavior unchanged.
+    """
     src = event.get("source_ip", "")
     if src and not any(src.startswith(p) for p in ("10.", "192.168.", "172.16.", "127.")):
         geo = await geolocation.lookup(src)
@@ -136,7 +143,8 @@ async def _enrich_and_store(event: dict) -> None:
             event["city"] = fallback["city"]
 
     await db.insert_event(event)
-    await broadcast_event(event)
+    if broadcast:
+        await broadcast_event(event)
 
 
 # ─── Archive ───────────────────────────────────────────────────────────────────
@@ -291,6 +299,34 @@ async def upload_logs(file: UploadFile = File(...)):
     # Cap at 10,000 events per upload
     raw_events = raw_events[:10_000]
 
+    # ─── Alert Storm Guard (upload path only — see PDF-derived strategy) ───────
+    # Unifies related events, fine-tunes via the existing IP whitelist, groups
+    # near-identical duplicates, archives noise instead of broadcasting it, and
+    # does all of this automatically. Fails safe: any error here just falls
+    # back to treating every parsed event as actionable, exactly like before.
+    actionable_events = raw_events
+    archive_only_events: list[dict] = []
+    storm_stats = {
+        "total_received": len(raw_events),
+        "whitelisted_dropped": 0,
+        "duplicate_grouped": 0,
+        "archived_duplicates": 0,
+        "actionable_incidents": len(raw_events),
+    }
+    try:
+        from backend.services.alert_storm_guard import apply_storm_guard
+        current_settings = await db.get_settings()
+        ip_whitelist = current_settings.get("ip_whitelist", [])
+        duplicate_threshold = int(
+            (current_settings.get("alert_storm_guard") or {}).get("duplicate_threshold", 5)
+        )
+        actionable_events, archive_only_events, storm_stats = apply_storm_guard(
+            raw_events, ip_whitelist=ip_whitelist, duplicate_threshold=duplicate_threshold
+        )
+    except Exception as e:
+        log.warning(f"Alert Storm Guard failed, falling back to unfiltered upload: {e}")
+        actionable_events, archive_only_events = raw_events, []
+
     # Switch state to upload mode
     app_state.input_mode = "upload"
     app_state.feed_state = "LIVE_FEED_ACTIVE"
@@ -313,17 +349,29 @@ async def upload_logs(file: UploadFile = File(...)):
         },
     })
 
-    # Process in background — normalize, enrich with geo, store, and broadcast
+    # Process in background — normalize, enrich with geo, store, and broadcast.
+    # Actionable (grouped) incidents go out live at the normal organic pace.
+    # Archived duplicates are still persisted for the Log Archive/compliance
+    # trail, but skip the live broadcast so they can't flood the feed/globe.
     async def process():
-        for raw in raw_events:
+        for raw in actionable_events:
             if isinstance(raw, dict):
                 event = _normalize_uploaded_event(raw)
-                await _enrich_and_store(event)
+                await _enrich_and_store(event, broadcast=True)
                 await asyncio.sleep(0.08)  # ~12 events/sec organic pacing
+        for raw in archive_only_events:
+            if isinstance(raw, dict):
+                event = _normalize_uploaded_event(raw)
+                await _enrich_and_store(event, broadcast=False)
+                await asyncio.sleep(0.005)  # quiet background write, no feed impact
 
     asyncio.create_task(process())
 
-    return {"status": "processing", "events_queued": len(raw_events)}
+    return {
+        "status": "processing",
+        "events_queued": len(actionable_events) + len(archive_only_events),
+        "alert_storm_guard": storm_stats,
+    }
 
 
 @router.post("/target-ip")

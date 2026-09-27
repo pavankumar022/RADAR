@@ -128,8 +128,10 @@ export default function Settings() {
     try {
       const result = await api.logs.upload(file)
       const count = result.events_queued ?? 0
+      // Alert Storm Guard stats (upload path only) — safe to omit, defaults to null
+      const stormStats = result.alert_storm_guard ?? null
       dispatch({ type: 'SET_INPUT_MODE', payload: 'upload' })
-      dispatch({ type: 'SET_UPLOAD_FILE', payload: { name: file.name, count } })
+      dispatch({ type: 'SET_UPLOAD_FILE', payload: { name: file.name, count, stormStats } })
     } catch (err) {
       const raw = err.message || ''
       let friendly = 'Upload failed — check file format and try again.'
@@ -278,6 +280,27 @@ export default function Settings() {
                 CHANGE FILE
               </button>
             </div>
+          )}
+
+          {/* Alert Storm Guard — only shown when it actually grouped/suppressed something */}
+          {activeMode === 'upload' && !uploading && state.uploadFile?.stormStats && (
+            (state.uploadFile.stormStats.duplicate_grouped > 0 ||
+              state.uploadFile.stormStats.whitelisted_dropped > 0) && (
+              <div className="px-3 py-2 rounded border border-outline/15 bg-surface-low/50 fade-in">
+                <p className="mono-label text-on-surface-variant text-[10px] leading-relaxed">
+                  🛡️ Alert Storm Guard —{' '}
+                  {state.uploadFile.stormStats.actionable_incidents.toLocaleString()} incident
+                  {state.uploadFile.stormStats.actionable_incidents === 1 ? '' : 's'} surfaced live
+                  {state.uploadFile.stormStats.duplicate_grouped > 0 && (
+                    <>, {state.uploadFile.stormStats.duplicate_grouped.toLocaleString()} duplicate alerts grouped</>
+                  )}
+                  {state.uploadFile.stormStats.whitelisted_dropped > 0 && (
+                    <>, {state.uploadFile.stormStats.whitelisted_dropped.toLocaleString()} whitelisted-IP alerts suppressed</>
+                  )}
+                  .
+                </p>
+              </div>
+            )
           )}
 
           {/* Synthetic — pacing delay slider */}
