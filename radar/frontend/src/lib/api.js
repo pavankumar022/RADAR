@@ -26,6 +26,11 @@ export const api = {
   alerts: {
     latest: (limit = 20) => request(`/alerts/latest?limit=${limit}`),
     stats: () => request('/alerts/stats'),
+    triage: (alertId, status, notes) =>
+      request(`/alerts/${alertId}/triage`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status, notes }),
+      }),
   },
 
   // ─── Logs ────────────────────────────────────────────────────────────────────

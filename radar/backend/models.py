@@ -12,6 +12,7 @@ import uuid
 # ─── Severity / State Enums ───────────────────────────────────────────────────
 
 SeverityLevel = Literal["critical", "warning", "info"]
+TriageStatus = Literal["new", "investigating", "true_positive", "false_positive", "benign", "resolved"]
 FeedState = Literal["LOADING_SYNTHETIC", "SYNTHETIC_FEED", "LIVE_FEED_ACTIVE", "SYSTEM_STANDBY"]
 InputMode = Literal["synthetic", "upload", "stream"]
 AIProvider = Literal["gemini", "claude", "mock"]
@@ -39,12 +40,18 @@ class SecurityEvent(BaseModel):
     country: Optional[str] = None
     city: Optional[str] = None
 
+    # ─── Triage / disposition (SOC analyst workflow) ──────────────────────────
+    status: TriageStatus = "new"
+    analyst_notes: Optional[str] = None
+    triaged_at: Optional[datetime] = None
+    resolution_seconds: Optional[float] = None
+
 
 # ─── WebSocket Messages ────────────────────────────────────────────────────────
 
 class WSMessage(BaseModel):
     """Envelope for all WebSocket messages pushed to clients."""
-    type: Literal["alert", "status", "stats", "mitre_update", "loop_stage", "replay_tick"]
+    type: Literal["alert", "alert_update", "status", "stats", "mitre_update", "loop_stage", "replay_tick"]
     payload: Any
 
 
@@ -57,8 +64,17 @@ class StatsPayload(BaseModel):
     total_alerts: int
     critical_count: int
     false_positive_count: int
+    true_positive_count: int = 0
+    new_count: int = 0
+    investigating_count: int = 0
+    avg_resolution_seconds: Optional[float] = None
     correlated_incidents: int
     events_per_sec: float
+
+
+class TriageRequest(BaseModel):
+    status: TriageStatus
+    notes: Optional[str] = None
 
 
 class MitreUpdatePayload(BaseModel):

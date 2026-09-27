@@ -9,9 +9,10 @@ import logging
 import time
 from typing import Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException
 
 from backend import database as db
+from backend.models import TriageRequest
 from backend.services.ws_manager import manager
 
 log = logging.getLogger(__name__)
@@ -89,6 +90,35 @@ async def get_latest_alerts(limit: int = Query(20, ge=1, le=100)):
 async def get_stats():
     """Live aggregate stats for stat cards."""
     return await db.get_stats()
+
+
+@router.patch("/api/alerts/{alert_id}/triage")
+async def triage_alert(alert_id: str, request: TriageRequest):
+    """
+    Analyst triage action: sets an alert's disposition (New / Investigating /
+    True Positive / False Positive / Benign / Resolved) with an optional note.
+    On first transition into a terminal status, the backend stamps
+    triaged_at and computes resolution_seconds (real MTTR, not an estimate).
+    Broadcasts the update to all connected dashboards.
+    """
+    try:
+        updated = await db.triage_event(alert_id, request.status, request.notes)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    if not updated:
+        raise HTTPException(404, f"Alert {alert_id} not found")
+
+    # Push to every connected client so the live feed / incident view / stats
+    # all reflect the disposition immediately, without a page refresh.
+    await manager.broadcast({
+        "type": "alert_update",
+        "payload": {"event": updated, "alert_id": updated.get("id")},
+    })
+    stats = await db.get_stats()
+    await manager.broadcast({"type": "stats", "payload": stats})
+
+    return updated
 
 
 # ─── Broadcast helpers (called by the main event loop) ────────────────────────

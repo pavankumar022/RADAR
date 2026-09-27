@@ -48,7 +48,7 @@ export default function Dashboard() {
       </div>
 
       {/* Middle row: Stat cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 shrink-0">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 shrink-0">
         <StatCard
           label="TOTAL ALERTS"
           value={stats.total_alerts}
@@ -66,16 +66,20 @@ export default function Dashboard() {
           barFill={stats.total_alerts > 0 ? stats.critical_count / stats.total_alerts : 0}
         />
         <StatCard
-          label="FALSE POSITIVES"
+          label="FALSE POSITIVES (TRIAGED)"
           value={stats.false_positive_count}
-          delta="8%"
-          deltaDir="down"
           color="warning"
-          barFill={0.3}
+          barFill={stats.total_alerts > 0 ? stats.false_positive_count / stats.total_alerts : 0}
         />
         <StatCard
-          label="CORRELATED INCIDENTS"
-          value={stats.correlated_incidents}
+          label="TRUE POSITIVES (TRIAGED)"
+          value={stats.true_positive_count}
+          color="critical"
+          barFill={stats.total_alerts > 0 ? stats.true_positive_count / stats.total_alerts : 0}
+        />
+        <StatCard
+          label="AVG RESOLUTION (SEC)"
+          value={stats.avg_resolution_seconds != null ? Math.round(stats.avg_resolution_seconds) : null}
           color="success"
           barFill={0.15}
         />

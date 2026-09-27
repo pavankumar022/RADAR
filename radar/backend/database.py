@@ -36,12 +36,18 @@ CREATE TABLE IF NOT EXISTS events (
     lat             REAL,
     lon             REAL,
     country         TEXT,
-    city            TEXT
+    city            TEXT,
+    status          TEXT NOT NULL DEFAULT 'new'
+                        CHECK (status IN ('new','investigating','true_positive','false_positive','benign','resolved')),
+    analyst_notes   TEXT,
+    triaged_at      TEXT,
+    resolution_seconds REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_timestamp  ON events(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_events_severity   ON events(severity);
 CREATE INDEX IF NOT EXISTS idx_events_technique  ON events(technique_id);
+CREATE INDEX IF NOT EXISTS idx_events_status     ON events(status);
 
 CREATE TABLE IF NOT EXISTS playbooks (
     id              TEXT PRIMARY KEY,
@@ -91,8 +97,33 @@ async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(SCHEMA_SQL)
         await db.commit()
+        await _migrate_triage_columns(db)
         await _seed_default_settings(db)
     log.info("Database ready")
+
+
+async def _migrate_triage_columns(db: aiosqlite.Connection) -> None:
+    """
+    Add triage columns to pre-existing 'events' tables created before the
+    triage workflow existed. CREATE TABLE IF NOT EXISTS won't add columns to
+    an already-existing table, so patch it here. Safe to run every startup —
+    each ALTER is skipped if the column is already present.
+    """
+    cursor = await db.execute("PRAGMA table_info(events)")
+    existing_cols = {row[1] for row in await cursor.fetchall()}
+
+    migrations = [
+        ("status", "TEXT NOT NULL DEFAULT 'new'"),
+        ("analyst_notes", "TEXT"),
+        ("triaged_at", "TEXT"),
+        ("resolution_seconds", "REAL"),
+    ]
+    for col_name, col_def in migrations:
+        if col_name not in existing_cols:
+            log.info(f"Migrating events table: adding column '{col_name}'")
+            await db.execute(f"ALTER TABLE events ADD COLUMN {col_name} {col_def}")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_events_status ON events(status)")
+    await db.commit()
 
 
 async def _seed_default_settings(db: aiosqlite.Connection) -> None:
@@ -117,8 +148,8 @@ async def insert_event(event: dict) -> None:
             INSERT OR REPLACE INTO events
             (id, timestamp, source_ip, destination_ip, event_type, severity,
              technique_id, tactic, description, raw_payload, playbook_generated,
-             lat, lon, country, city)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             lat, lon, country, city, status)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             event["id"],
             event.get("timestamp", datetime.utcnow().isoformat()),
@@ -135,6 +166,7 @@ async def insert_event(event: dict) -> None:
             event.get("lon"),
             event.get("country"),
             event.get("city"),
+            event.get("status", "new"),
         ))
         await db.commit()
 
@@ -145,8 +177,8 @@ async def insert_events_batch(events: list[dict]) -> None:
             INSERT OR REPLACE INTO events
             (id, timestamp, source_ip, destination_ip, event_type, severity,
              technique_id, tactic, description, raw_payload, playbook_generated,
-             lat, lon, country, city)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             lat, lon, country, city, status)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, [
             (
                 event["id"],
@@ -163,7 +195,8 @@ async def insert_events_batch(events: list[dict]) -> None:
                 event.get("lat"),
                 event.get("lon"),
                 event.get("country"),
-                event.get("city")
+                event.get("city"),
+                event.get("status", "new"),
             )
             for event in events
         ])
@@ -255,16 +288,79 @@ async def mark_event_playbook_generated(event_id: str) -> None:
         await db.commit()
 
 
+# ─── Triage ───────────────────────────────────────────────────────────────────
+
+TERMINAL_STATUSES = {"true_positive", "false_positive", "benign", "resolved"}
+VALID_STATUSES = {"new", "investigating", "true_positive", "false_positive", "benign", "resolved"}
+
+
+async def triage_event(event_id: str, status: str, notes: Optional[str] = None) -> Optional[dict]:
+    """
+    Update an alert's disposition. On first transition into a terminal status
+    (true_positive / false_positive / benign / resolved), stamps triaged_at
+    and computes resolution_seconds from the original event timestamp — this
+    is what powers the real (not estimated) MTTR shown in the UI.
+    Returns the updated event, or None if the alert doesn't exist.
+    """
+    if status not in VALID_STATUSES:
+        raise ValueError(f"invalid status '{status}'")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        row = await (await db.execute("SELECT * FROM events WHERE id=?", (event_id,))).fetchone()
+        if not row:
+            return None
+        existing = dict(row)
+
+        now = datetime.utcnow()
+        # Only stamp triaged_at / resolution_seconds the first time it lands
+        # in a terminal state — re-triaging (e.g. reopening) shouldn't erase history.
+        triaged_at = existing.get("triaged_at")
+        resolution_seconds = existing.get("resolution_seconds")
+        if status in TERMINAL_STATUSES and not triaged_at:
+            triaged_at = now.isoformat()
+            try:
+                created = datetime.fromisoformat(str(existing["timestamp"]).replace("Z", "+00:00"))
+                resolution_seconds = max(0.0, (now.replace(tzinfo=None) - created.replace(tzinfo=None)).total_seconds())
+            except Exception:
+                resolution_seconds = None
+
+        await db.execute(
+            "UPDATE events SET status=?, analyst_notes=?, triaged_at=?, resolution_seconds=? WHERE id=?",
+            (status, notes, triaged_at, resolution_seconds, event_id),
+        )
+        await db.commit()
+
+    return await get_event_by_id(event_id)
+
+
 async def get_stats() -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
         total = (await (await db.execute("SELECT COUNT(*) FROM events")).fetchone())[0]
         critical = (await (await db.execute("SELECT COUNT(*) FROM events WHERE severity='critical'")).fetchone())[0]
-        false_pos = max(0, int(total * 0.10))   # ~10% false positive estimate
+
+        status_rows = await (await db.execute(
+            "SELECT status, COUNT(*) as c FROM events GROUP BY status"
+        )).fetchall()
+        status_counts = {r["status"]: r["c"] for r in status_rows}
+
+        avg_row = await (await db.execute(
+            "SELECT AVG(resolution_seconds) FROM events WHERE resolution_seconds IS NOT NULL"
+        )).fetchone()
+        avg_resolution_seconds = avg_row[0]
+
         correlated = max(0, int(critical * 0.33))
+
     return {
         "total_alerts": total,
         "critical_count": critical,
-        "false_positive_count": false_pos,
+        # Real disposition counts (not an estimate) — 0 until analysts start triaging
+        "false_positive_count": status_counts.get("false_positive", 0),
+        "true_positive_count": status_counts.get("true_positive", 0),
+        "new_count": status_counts.get("new", 0),
+        "investigating_count": status_counts.get("investigating", 0),
+        "avg_resolution_seconds": round(avg_resolution_seconds, 1) if avg_resolution_seconds else None,
         "correlated_incidents": correlated,
     }
 

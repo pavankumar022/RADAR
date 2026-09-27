@@ -40,6 +40,10 @@ const initialState = {
     total_alerts: 0,
     critical_count: 0,
     false_positive_count: 0,
+    true_positive_count: 0,
+    new_count: 0,
+    investigating_count: 0,
+    avg_resolution_seconds: null,
     correlated_incidents: 0,
     events_per_sec: 0,
   },
@@ -104,6 +108,13 @@ function reducer(state, action) {
       return { ...state, alerts }
     }
 
+    case 'ALERT_UPDATE': {
+      // In-place update (triage disposition changed) — never reorders the feed.
+      const updated = action.payload.event
+      const alerts = state.alerts.map(a => (a.id === updated.id ? { ...a, ...updated } : a))
+      return { ...state, alerts }
+    }
+
     case 'STATS_UPDATE':
       return { ...state, stats: { ...state.stats, ...action.payload } }
 
@@ -139,6 +150,10 @@ function reducer(state, action) {
           total_alerts: 0,
           critical_count: 0,
           false_positive_count: 0,
+          true_positive_count: 0,
+          new_count: 0,
+          investigating_count: 0,
+          avg_resolution_seconds: null,
           correlated_incidents: 0,
           events_per_sec: 0,
         },
@@ -164,6 +179,9 @@ export function StoreProvider({ children }) {
       case 'alert':
         epsCountRef.current++
         dispatch({ type: 'NEW_ALERT', payload: msg.payload })
+        break
+      case 'alert_update':
+        dispatch({ type: 'ALERT_UPDATE', payload: msg.payload })
         break
       case 'status':
         dispatch({ type: 'STATUS_UPDATE', payload: msg.payload })

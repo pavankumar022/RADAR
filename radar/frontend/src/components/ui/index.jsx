@@ -17,6 +17,41 @@ export function SeverityChip({ severity }) {
   )
 }
 
+// Triage status chip
+export const TRIAGE_STATUSES = [
+  { value: 'new', label: 'New' },
+  { value: 'investigating', label: 'Investigating' },
+  { value: 'true_positive', label: 'True Positive' },
+  { value: 'false_positive', label: 'False Positive' },
+  { value: 'benign', label: 'Benign' },
+  { value: 'resolved', label: 'Resolved' },
+]
+
+export function StatusChip({ status }) {
+  const styles = {
+    new: 'bg-outline/10 text-on-surface-variant border-outline/30',
+    investigating: 'bg-warning/15 text-warning border-warning/40',
+    true_positive: 'bg-critical/15 text-critical border-critical/40',
+    false_positive: 'bg-secondary/15 text-secondary border-secondary/40',
+    benign: 'bg-secondary/15 text-secondary border-secondary/40',
+    resolved: 'bg-primary/15 text-primary border-primary/40',
+  }
+  const labels = {
+    new: 'NEW',
+    investigating: 'INVESTIGATING',
+    true_positive: 'TRUE POSITIVE',
+    false_positive: 'FALSE POSITIVE',
+    benign: 'BENIGN',
+    resolved: 'RESOLVED',
+  }
+  const cls = styles[status] ?? styles.new
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border mono-data text-[10px] font-bold tracking-wide ${cls}`}>
+      {labels[status] ?? 'NEW'}
+    </span>
+  )
+}
+
 // Technique badge
 export function TechniqueBadge({ id }) {
   if (!id) return <span className="text-outline mono-data">—</span>

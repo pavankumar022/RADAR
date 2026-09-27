@@ -1,6 +1,6 @@
 import React from 'react'
 import { useStore } from '../../lib/store'
-import { SeverityChip, TechniqueBadge } from '../ui'
+import { SeverityChip, TechniqueBadge, StatusChip } from '../ui'
 import { useNavigate } from 'react-router-dom'
 
 function formatTime(ts) {
@@ -45,9 +45,10 @@ const AlertRow = React.memo(({ event }) => {
             {event.destination_ip || event.description?.slice(0, 50)}
           </p>
         </div>
-        <div className="text-right shrink-0">
+        <div className="text-right shrink-0 flex flex-col items-end gap-1">
           <p className="mono-data text-on-surface-variant text-xs">{formatTime(event.timestamp)}</p>
           <TechniqueBadge id={event.technique_id} />
+          {event.status && event.status !== 'new' && <StatusChip status={event.status} />}
         </div>
       </div>
     </div>

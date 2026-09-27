@@ -8,10 +8,90 @@ import { jsPDF } from 'jspdf'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useStore } from '../lib/store'
 import { api } from '../lib/api'
-import { SeverityChip, TechniqueBadge, Skeleton, EmptyState } from '../components/ui'
+import { SeverityChip, TechniqueBadge, StatusChip, TRIAGE_STATUSES, Skeleton, EmptyState } from '../components/ui'
 
 function formatTime(ts) {
   try { return new Date(ts).toLocaleTimeString('en-US', { hour12: false }) } catch { return '??' }
+}
+
+function formatDuration(seconds) {
+  if (seconds == null) return '—'
+  if (seconds < 60) return `${Math.round(seconds)}s`
+  const mins = Math.floor(seconds / 60)
+  const secs = Math.round(seconds % 60)
+  if (mins < 60) return `${mins}m ${secs}s`
+  const hrs = Math.floor(mins / 60)
+  return `${hrs}h ${mins % 60}m`
+}
+
+// ─── Triage panel — SOC analyst disposition workflow ──────────────────────────
+function TriagePanel({ alert, onTriaged }) {
+  const [notes, setNotes] = useState(alert.analyst_notes || '')
+  const [saving, setSaving] = useState(null) // status currently being submitted
+
+  useEffect(() => {
+    setNotes(alert.analyst_notes || '')
+  }, [alert.id])
+
+  const handleSetStatus = async (status) => {
+    setSaving(status)
+    try {
+      const updated = await api.alerts.triage(alert.id, status, notes)
+      onTriaged?.(updated)
+    } catch (e) {
+      console.error('Triage failed:', e)
+    } finally {
+      setSaving(null)
+    }
+  }
+
+  const isTerminal = ['true_positive', 'false_positive', 'benign', 'resolved'].includes(alert.status)
+
+  return (
+    <div className="card p-4 md:p-5 mb-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="mono-label text-primary">Triage</h3>
+        <div className="flex items-center gap-2">
+          <StatusChip status={alert.status || 'new'} />
+          {alert.resolution_seconds != null && (
+            <span className="mono-data text-[10px] text-on-surface-variant">
+              resolved in {formatDuration(alert.resolution_seconds)}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2 mb-3">
+        {TRIAGE_STATUSES.filter(s => s.value !== 'new').map(s => (
+          <button
+            key={s.value}
+            onClick={() => handleSetStatus(s.value)}
+            disabled={saving !== null}
+            className={`px-2.5 py-1 rounded border text-[11px] font-mono font-bold tracking-wide transition-all disabled:opacity-50 ${
+              alert.status === s.value
+                ? 'bg-primary/20 border-primary/50 text-primary'
+                : 'bg-surface-high border-outline/20 text-on-surface-variant hover:border-primary/40'
+            }`}
+          >
+            {saving === s.value ? '...' : s.label}
+          </button>
+        ))}
+      </div>
+
+      <textarea
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+        placeholder="Analyst notes — why this is a true/false positive, root cause, remediation taken..."
+        rows={2}
+        className="w-full text-xs mono-data bg-surface-lowest border border-outline/20 rounded p-2 text-on-surface placeholder:text-outline focus:outline-none focus:border-primary/40 resize-none"
+      />
+      {isTerminal && (
+        <p className="text-[10px] text-on-surface-variant mt-1">
+          Disposition set. Notes can still be edited — click a status again to save.
+        </p>
+      )}
+    </div>
+  )
 }
 
 // ─── Incident List (sidebar) ──────────────────────────────────────────────────
@@ -53,7 +133,10 @@ function IncidentList({ onSelect, selectedId, active, onClearAll }) {
               </div>
               <p className="font-mono text-xs font-bold text-on-surface">{ev.event_type}</p>
               <p className="mono-data text-xs text-primary truncate">Src: {ev.source_ip}</p>
-              {ev.technique_id && <TechniqueBadge id={ev.technique_id} />}
+              <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                {ev.technique_id && <TechniqueBadge id={ev.technique_id} />}
+                {ev.status && ev.status !== 'new' && <StatusChip status={ev.status} />}
+              </div>
             </div>
           ))
         )}
@@ -71,7 +154,8 @@ function PlaybookDetail({
   active,
   report,
   loadingReport,
-  onGenerateReport
+  onGenerateReport,
+  onTriaged,
 }) {
   const [steps, setSteps] = useState([])
 
@@ -220,6 +304,8 @@ function PlaybookDetail({
           </div>
         </div>
 
+        <TriagePanel alert={alert} onTriaged={onTriaged} />
+
         {/* Playbook content */}
         {playbook && (
           <div className="space-y-4">
@@ -271,16 +357,6 @@ function PlaybookDetail({
               </div>
             )}
 
-            {/* Actions */}
-            <div className="flex items-center justify-between pt-2">
-              <button className="btn-danger text-xs md:text-sm">Escalate</button>
-              <button className="btn-success flex items-center gap-2 text-xs md:text-sm">
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <polyline points="20 6 9 17 4 12"/>
-                </svg>
-                Mark as Resolved
-              </button>
-            </div>
           </div>
         )}
 
@@ -434,6 +510,14 @@ export default function Incidents() {
     }
   }
 
+  const handleTriaged = (updated) => {
+    // Optimistic local update + push into the shared store so the incident
+    // list, live alert feed, and stats cards all reflect it immediately —
+    // don't wait on the websocket round-trip for the analyst's own action.
+    setSelectedAlert(prev => (prev ? { ...prev, ...updated } : prev))
+    dispatch({ type: 'ALERT_UPDATE', payload: { event: updated } })
+  }
+
   const handleClearAll = async () => {
     if (!window.confirm("Are you sure you want to clear all incidents and alerts? This will also stop replay and clear the log archive.")) return
     try {
@@ -460,6 +544,7 @@ export default function Incidents() {
         loadingReport={loadingReport}
         onGenerateReport={handleGenerateReport}
         active={!!selectedAlert}
+        onTriaged={handleTriaged}
       />
     </div>
   )
